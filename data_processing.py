@@ -261,7 +261,7 @@ class ColumnDataset(Dataset):
         return cls(X, y, var_names,level_coord)
 
 def data_processing_pipeline(model_datasets,
-                              VAR_CHANNELS, LEVEL_DIM, TIME_DIM, SAMPLE_DIM):
+                              var_channels, logger=logging.getLogger(__name__)):
     """
     TODO ADD DESCRIPTION-combine normalise
     """
@@ -304,9 +304,9 @@ def data_processing_pipeline(model_datasets,
 
 
     # NAN stats - SORT!!!!!!!, probably delte for memory reasons later TODO
-    nan_frac_train, train_summary, train_any = compute_nan_fraction(ds_train_norm, VAR_CHANNELS)
-    nan_frac_validation,  validation_summary,  validation_any  = compute_nan_fraction(ds_validation_norm,  VAR_CHANNELS)
-    nan_frac_test,  test_summary,  test_any  = compute_nan_fraction(ds_test_norm,  VAR_CHANNELS)
+    nan_frac_train, train_summary, train_any = compute_nan_fraction(ds_train_norm, var_channels)
+    nan_frac_validation,  validation_summary,  validation_any  = compute_nan_fraction(ds_validation_norm,  var_channels)
+    nan_frac_test,  test_summary,  test_any  = compute_nan_fraction(ds_test_norm,  var_channels)
 
     # TODO add nan_frac to ds??
 
@@ -327,9 +327,9 @@ def data_processing_pipeline(model_datasets,
         test_summary["pairs_with_any_nan"], test_summary["total_pairs"], test_summary["pairs_with_any_nan_%"]
     )
 
-    train_ds = ColumnDataset.from_xr(ds_train, VAR_CHANNELS)
-    validation_ds  = ColumnDataset.from_xr(ds_validation, VAR_CHANNELS)
-    test_ds  = ColumnDataset.from_xr(ds_test, VAR_CHANNELS)
+    train_ds = ColumnDataset.from_xr(ds_train, var_channels)
+    validation_ds  = ColumnDataset.from_xr(ds_validation, var_channels)
+    test_ds  = ColumnDataset.from_xr(ds_test, var_channels)
 
 
     
@@ -364,12 +364,9 @@ if __name__ == "__main__":
         "RAP": rap_col
     }
 
-    ds_train, ds_validation, ds_test = data_processing_pipeline(model_datasets = model_datasets, VAR_CHANNELS=VAR_CHANNELS, 
-                                                                LEVEL_DIM=LEVEL_DIM, TIME_DIM=TIME_DIM, SAMPLE_DIM=SAMPLE_DIM)
+    ds_train, ds_validation, ds_test = data_processing_pipeline(model_datasets = model_datasets, var_channels=VAR_CHANNELS, 
+                                                                logger=logger)
 
-    logger.info("Train dataset size: %d samples", len(ds_train))
-    logger.info("Validation dataset size: %d samples", len(ds_validation))  
-    logger.info("Test dataset size: %d samples", len(ds_test))
 
 
 
