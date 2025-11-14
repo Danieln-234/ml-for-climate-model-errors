@@ -66,6 +66,7 @@ class SimpleLevelCNN(nn.Module):
         return logits
 
 class EarlyStopping:
+    """Early stopping utility to stop training when validation loss does not improve."""
     def __init__(self, patience=20, min_delta=0.0):
         self.patience = patience
         self.min_delta = min_delta
@@ -94,6 +95,7 @@ class EarlyStopping:
 
 
 def evaluate(loader, model, criterion, device):
+    """"helpter function to evaluate model on a given dataset loader.For the CNN"""
     model.eval()
     correct, total, loss_sum = 0, 0, 0.0
     with torch.no_grad():
@@ -115,6 +117,8 @@ def evaluate(loader, model, criterion, device):
 
 
 def run_single_cnn(ds_train, ds_validation, ds_test, var_channels, epochs, device, logger=logging.getLogger(__name__)):
+    """"Run a single training of the CNN model and return the trained model along with test loss and accuracy.
+    """
     # Build datasets
     # Careful if this adds to the time bc can dvide by the number of times we repeat the CNN per column
     train_loader = DataLoader(ds_train, batch_size=128, shuffle=True)
@@ -122,7 +126,7 @@ def run_single_cnn(ds_train, ds_validation, ds_test, var_channels, epochs, devic
     test_loader  = DataLoader(ds_test,  batch_size=256, shuffle=False)
 
 
-    # Input: [B, C, L] where C=#channels (2 here), L=#levels (46)
+    # Input: [B, C, L] where C=no. channels (2 here), L=no. levels (46)
     num_classes = len(np.unique(ds_train.y))
 
     #num_classes = len(torch.unique(ds_train.y))
@@ -186,48 +190,118 @@ def run_single_cnn(ds_train, ds_validation, ds_test, var_channels, epochs, devic
 
     return model, test_loss, test_acc
 
-def run_single_integrated_gradients(model, ds_test, device, logger):
+def compute_mean_variable_profile(ds_test, device):
+    """Compute mean and std of input variables over the test dataset. This is only for the IG (TODO hmmm maybe plots instead in the single IG, less complicated) which is done over the total test ds"""
+    X_list = []
+
+    for i in range(len(ds_test)):
+        X, y = ds_test[i]              # X: [C, L], already on CPU tensor I assume
+        X_list.append(X.numpy())       
+
+    X_all = np.stack(X_list, axis=0)   # [N, C, L]
+    mean_vars = X_all.mean(axis=0)     # [C, L]
+    std_vars  = X_all.std(axis=0)      # [C, L]
+
+    return mean_vars, std_vars
+
+
+def run_single_integrated_gradients(model, ds_test, device, logger, return_all=False):
+    """Run Integrated Gradients on the test dataset and return mean and std of attributions over test samples."""
     model.eval()
-    X, y = ds_test[0]
-    logits = model(X.unsqueeze(0).to(device))
-
-    input_img = X.unsqueeze(0).to(device)
-
-    #  Integrated Gradients 
     integrated_gradients = IntegratedGradients(model)
-    baseline = torch.zeros_like(input_img)   # standard zero baseline; change if you prefer
+    attribution_array = []
 
-    pred_label_idx = int(torch.argmax(logits, dim=1).item())
+    # Iterate over the test samples, then take average of attributiuons and std, along with average variables
+    for i in range(len(ds_test)):
+        X, y = ds_test[i]
+        with torch.no_grad():
+            logits = model(X.unsqueeze(0).to(device))
+            target_idx = logits.argmax(dim=1).item()
 
-    attributions_ig = integrated_gradients.attribute(
-        input_img,
-        baselines=baseline,
-        target=pred_label_idx,
-        n_steps=200     # TODO: pick based on computaiton complexoty
-    )
+        input_img = X.unsqueeze(0).to(device)
 
-    logger.info("input_img shape: %s", tuple(input_img.shape))
-    logger.info("attributions_ig shape: %s", tuple(attributions_ig.shape))
+ 
+        baseline = torch.zeros_like(input_img) 
+
+        attributions_ig = integrated_gradients.attribute(
+            input_img,
+            baselines=baseline,
+            target=target_idx,
+            n_steps=200     # TODO: pick based on computaiton complexoty
+        )
+        reduced_attr = attributions_ig.squeeze(0)
+        attribution_array.append(reduced_attr.cpu().detach().numpy())
+
+        logger.info("input_img shape: %s", tuple(input_img.shape))
+        logger.info("attributions_ig shape: %s", tuple(attributions_ig.shape))
+        
+    all_attrs = np.stack(attribution_array, axis=0)  
+    mean_over_samples = all_attrs.mean(axis=0) 
+    std_over_samples  = all_attrs.std(axis=0) 
+
+    if return_all:
+        return mean_over_samples, std_over_samples, all_attrs
+    else:
+        return mean_over_samples, std_over_samples
 
 
-    # TODO: come back in case this should be done later and preferthe other format
-    reduced_attr = attributions_ig.squeeze(0)
-    return reduced_attr
+
+def run_cnn_ig_pipeline(ds_train, ds_validation, ds_test, var_channels, epochs, device, run_count, compute_correlations=False, logger=logging.getLogger(__name__)):
+
+    #TODO Do loop, also maybe split CNN training into separate script????
+    model_run_stats = []
+    ig_stats = []
+    corr_results = None    # correlation matrix for IG vs variables, deeper level analysis that should be used when investigating a single or few columns
+
+    rep_all_attrs = None
+    rep_all_inputs = None #TODO remove later
+
+    
+    for run_idx in range(run_count):
+        logger.info("Starting CNN run %d of %d", run_idx + 1, run_count)
+        model, test_loss, test_acc = run_single_cnn(
+            ds_train,
+            ds_validation,
+            ds_test,
+            var_channels,
+            epochs, device, logger
+        )
+        model_run_stats.append({
+            "run_idx": run_idx,
+            "test_loss": test_loss,
+            "test_acc": test_acc
+        })
+
+        reduced_attr = run_single_integrated_gradients(model, ds_test, device, logger, return_all=True)
+        ig_stats.append(reduced_attr.cpu().numpy())
+
+    #Accuracy/loss aggregation
+    accs  = np.array([entry["test_acc"]  for entry in model_run_stats])  
+    losses = np.array([entry["test_loss"] for entry in model_run_stats]) 
+
+    mean_acc = accs.mean()
+    std_acc  = accs.std()
+
+    mean_loss = losses.mean()
+    std_loss  = losses.std()
+
+    model_stats_summary = {
+        "mean_acc": mean_acc,
+        "std_acc": std_acc,
+        "mean_loss": mean_loss,
+        "std_loss": std_loss
+    }
+
+    # IG stats aggregation
+    ig_stats = np.stack(ig_stats, axis=0)   # shape (R, C, L) (TODO:KEEP TRACK)
+
+    mean_ig = ig_stats.mean(axis=0)       
+    std_ig  = ig_stats.std(axis=0) 
 
 
 
-def run_cnn(ds_train, ds_validation, ds_test, var_channels, epochs, device, logger=logging.getLogger(__name__)):
 
-    #TODO Do loop
-    model, test_loss, test_acc = run_single_cnn(
-        ds_train,
-        ds_validation,
-        ds_test,
-        var_channels,
-        epochs, device, logger
-    )
-    reduced_attr = run_single_integrated_gradients(model, ds_test, device, logger)
-    return
+    return model_stats_summary, mean_ig, std_ig
 
 
 
@@ -248,6 +322,7 @@ if __name__ == "__main__":
     LEVEL_DIM = "newlev"
     TIME_DIM = "time"
     SAMPLE_DIM = "sample"
+    run_count = 10
 
     ds_gfs = xr.open_dataset("GFS_merged_latid197.nc")
     ds_rap = xr.open_dataset("RAP_merged_latid197.nc")
@@ -266,4 +341,4 @@ if __name__ == "__main__":
 
     ds_train, ds_validation, ds_test = data_processing_pipeline(model_datasets = model_datasets, var_channels=VAR_CHANNELS)
 
-    run_cnn(ds_train, ds_validation, ds_test, VAR_CHANNELS, EPOCHS, device, logger)
+    model_stats_summary, mean_ig, std_ig =run_cnn_ig_pipeline(ds_train, ds_validation, ds_test, VAR_CHANNELS, EPOCHS, device, run_count, logger)

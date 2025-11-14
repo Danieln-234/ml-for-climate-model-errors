@@ -327,9 +327,9 @@ def data_processing_pipeline(model_datasets,
         test_summary["pairs_with_any_nan"], test_summary["total_pairs"], test_summary["pairs_with_any_nan_%"]
     )
 
-    train_ds = ColumnDataset.from_xr(ds_train, var_channels)
-    validation_ds  = ColumnDataset.from_xr(ds_validation, var_channels)
-    test_ds  = ColumnDataset.from_xr(ds_test, var_channels)
+    train_ds = ColumnDataset.from_xr(ds_train_norm, var_channels)
+    validation_ds  = ColumnDataset.from_xr(ds_validation_norm, var_channels)
+    test_ds  = ColumnDataset.from_xr(ds_test_norm, var_channels)
 
 
     
