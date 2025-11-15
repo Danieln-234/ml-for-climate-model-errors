@@ -195,8 +195,8 @@ def compute_mean_variable_profile(ds_test, device):
 
     for i in range(len(ds_test)):
         X, y = ds_test[i]              # X: [C, L], already on CPU tensor I assume
-        X_list.append(X.numpy())       
-
+        X_list.append(X.detach().cpu().numpy())
+       
     X_all = np.stack(X_list, axis=0)   # [N, C, L]
     mean_vars = X_all.mean(axis=0)     # [C, L]
     std_vars  = X_all.std(axis=0)      # [C, L]
@@ -244,18 +244,40 @@ def run_single_integrated_gradients(model, ds_test, device, logger, return_all=F
     else:
         return mean_over_samples, std_over_samples
 
+def compute_corr_run(all_inputs, all_attrs):
+    """
+    For correlation
+    all_inputs: [N, C, L]  (X)
+    all_attrs:  [N, C, L]  (|IG|)
+    Returns corr_run: [C, L] with corr(|X|, |IG|) per (c,l).
+    """
+    N, C, L = all_inputs.shape
+    corrs = np.full((C, L), np.nan)
 
+    abs_inputs = np.abs(all_inputs)
+    abs_attrs  = np.abs(all_attrs)
 
-def run_cnn_ig_pipeline(ds_train, ds_validation, ds_test, var_channels, epochs, device, run_count, compute_correlations=False, logger=logging.getLogger(__name__)):
+    for c in range(C):
+        for l in range(L):
+            x = abs_inputs[:, c, l]
+            a = abs_attrs[:, c, l]
+            if x.std() > 0 and a.std() > 0:
+                corrs[c, l] = np.corrcoef(x, a)[0, 1]
+    return corrs
+
+def run_cnn_ig_pipeline(ds_train, ds_validation, ds_test, var_channels, epochs, device, run_count, return_all = False, compute_correlations=False, logger=logging.getLogger(__name__)):
     """TODO: Be very careful about where the absolutes are, they seem very arbtritray and ad hoc where placed, maybe centralise"""
     #TODO Do loop, also maybe split CNN training into separate script????
     model_run_stats = []
     ig_stats = []
     corr_runs = []    # correlation matrix for abs(IG) vs abs(variables)
 
-    # NB this only gets the first column sample correlation matrix- otherwise we get too many and it becomes like memory inetnsive
-    rep_all_attrs = None
-    rep_all_inputs = None 
+    # List oif channel variables over levels for the correlation part
+    X_list = []
+    for i in range(len(ds_test)):
+        X, y = ds_test[i]
+        X_list.append(X.detach().cpu().numpy())
+    all_inputs = np.stack(X_list, axis=0)
 
 
 
@@ -275,19 +297,15 @@ def run_cnn_ig_pipeline(ds_train, ds_validation, ds_test, var_channels, epochs, 
         })
 
         # Option to get correlation-  nb this is optional as memory intensive for when we run magnitudes more samples
-        #TODO COME BACK to his, I feel like this may need expanding
-        if compute_correlations and rep_all_attrs is None:
+        #TODO COME BACK to his, I feel like this may need expanding. Also donlt need secind if not None I donlt think
+        if compute_correlations:
             # For ONE run, keep full per-sample IGs + inputs
             mean_ig_run, std_ig_run, all_attrs = run_single_integrated_gradients(
                 model, ds_test, device, logger, return_all=True
             )
-            # get variable values
-            X_list = []
-            for i in range(len(ds_test)):
-                X, y = ds_test[i]
-                X_list.append(X.detach().cpu().numpy())
-            rep_all_inputs = np.stack(X_list, axis=0)  # [N, C, L]
-            rep_all_attrs = all_attrs                 # [N, C, L]
+            
+            corr_run = compute_corr_run(all_inputs, all_attrs)  # [C, L]
+            corr_runs.append(corr_run)
         else:
             mean_ig_run, std_ig_run = run_single_integrated_gradients(
                 model, ds_test, device, logger, return_all=False
@@ -320,28 +338,19 @@ def run_cnn_ig_pipeline(ds_train, ds_validation, ds_test, var_channels, epochs, 
     mean_ig = ig_stats.mean(axis=0)       
     std_ig  = ig_stats.std(axis=0) 
 
-    # Compute correlations if needed
-    if compute_correlations and rep_all_attrs is not None:
-        #NB:
-        # rep_all_inputs: [N, C, L]
-        # rep_all_attrs:  [N, C, L]
-        # Pearson correlation per (c, l)
-        N, C, L = rep_all_inputs.shape
-        corrs = np.full((C, L), np.nan)
-        for c in range(C):
-            for l in range(L):
-                #TODO: nb made abs here
-                x = np.abs(rep_all_inputs[:, c, l])
-                a = np.abs(rep_all_attrs[:, c, l])
-                if x.std() > 0 and a.std() > 0:
-                    corrs[c, l] = np.corrcoef(x, a)[0, 1]
-        corr_results = corrs
-        stability = 1.0 - std_ig / (mean_ig + 10**(-8))
+    # Compute correlations accroiss runs
+    if compute_correlations and len(corr_runs) > 0:
+        corr_all = np.stack(corr_runs, axis=0)  # [R, C, L]
+        corr_mean = corr_all.mean(axis=0)       # [C, L]
+        corr_std  = corr_all.std(axis=0) 
+        ig_stability = 1.0 - std_ig / (mean_ig + 10**(-8))
     else:
-        corr_results = None
+        corr_mean = None
+        corr_std  = None
+        ig_stability = None
     
 
-    return model_stats_summary, mean_ig, std_ig, corr_results
+    return model_stats_summary, mean_ig, std_ig, ig_stability, corr_mean, corr_std
 
 
 
@@ -371,10 +380,10 @@ def plot_ig_summary(
         ax1.invert_xaxis()  # optional (makes low pressure right side)
 
         # Variable profile on the right y-axis
-        ax2 = ax1.twinx()
-        ax2.plot(level_values, mean_vars[c, :], "r--", label="Mean Variable")
-        ax2.set_ylabel("Variable magnitude", color="red")
-        ax2.tick_params(axis="y", labelcolor="red")
+        # ax2 = ax1.twinx()
+        # ax2.plot(level_values, mean_vars[c, :], "r--", label="Mean Variable")
+        # ax2.set_ylabel("Variable magnitude", color="red")
+        # ax2.tick_params(axis="y", labelcolor="red")
 
         # Optional correlation line
         if corr_results is not None:
@@ -387,19 +396,49 @@ def plot_ig_summary(
 
         plt.title(f"IG + Variable + Correlation: {var_channels[c]}")
         plt.tight_layout()
-        plt.show()
 
-    # Correlation heatmap (optional)
-    if corr_results is not None:
-        plt.figure(figsize=(6, 6))
-        plt.imshow(corr_results, aspect="auto", cmap="coolwarm", vmin=-1, vmax=1)
-        plt.colorbar(label="Correlation (X vs IG)")
-        plt.yticks(range(C), var_channels)
-        plt.xticks(range(L), [f"{p:.0f}" for p in level_values], rotation=45)
-        plt.xlabel("Pressure level")
-        plt.title("Correlation Heatmap (Variable vs IG)")
+
+
+def plot_ig_stability(
+    ig_stability,
+    var_channels,
+    level_values,
+    figsize=(7, 5)
+):
+    """
+    Plot stability of IG attributions across runs.
+    ig_stability : [C, L] array (1 - std/mean)
+    var_channels : list of variable names
+    level_values : pressure level coordinates
+    """
+
+    C, L = ig_stability.shape
+
+    for c in range(C):
+        plt.figure(figsize=figsize)
+
+        plt.plot(level_values, ig_stability[c, :], "k-", label="Stability")
+
+        plt.xlabel("Pressure Level")
+        plt.ylabel("Stability (1 - std/mean)")
+        plt.ylim(0, 1.05)
+        plt.title(f"IG Stability: {var_channels[c]}")
+        plt.gca().invert_xaxis()   # Optional: deeper atmosphere to right
+        plt.grid(True)
         plt.tight_layout()
-        plt.show()
+
+
+    # Optional heatmap
+    plt.figure(figsize=(6, 6))
+    plt.imshow(ig_stability, aspect="auto", cmap="viridis", vmin=0, vmax=1)
+    plt.colorbar(label="IG Stability")
+    plt.yticks(range(C), var_channels)
+    plt.xticks(range(L), [f"{p:.0f}" for p in level_values], rotation=45)
+    plt.xlabel("Pressure level")
+    plt.title("IG Stability Heatmap")
+    plt.tight_layout()
+
+
 
 
 
@@ -419,6 +458,7 @@ if __name__ == "__main__":
     SAMPLE_DIM = "sample"
     run_count = 10
     compute_correlations = True
+    return_all = True
 
     ds_gfs = xr.open_dataset("GFS_merged_latid197.nc")
     ds_rap = xr.open_dataset("RAP_merged_latid197.nc")
@@ -437,7 +477,13 @@ if __name__ == "__main__":
 
     ds_train, ds_validation, ds_test = data_processing_pipeline(model_datasets = model_datasets, var_channels=VAR_CHANNELS)
 
-    model_stats_summary, mean_ig, std_ig, corr_results =run_cnn_ig_pipeline(ds_train, ds_validation, ds_test, VAR_CHANNELS, EPOCHS, device, run_count, compute_correlations=compute_correlations, logger=logger)
+    model_stats_summary, mean_ig, std_ig, ig_stability, corr_mean, corr_std = run_cnn_ig_pipeline(
+        ds_train, ds_validation, ds_test, VAR_CHANNELS,
+        EPOCHS, device, run_count,
+        return_all=return_all,
+        compute_correlations=compute_correlations,
+        logger=logger,
+    )   
     # MOve into piepline above TODO defineitely 
     plev = ds_test.level_coord
     plot_ig_summary(
@@ -445,6 +491,13 @@ if __name__ == "__main__":
         var_channels=VAR_CHANNELS,
         level_values=plev,
         mean_ig=mean_ig,
-        corr_results=corr_results,
-        device = device
+        corr_results=corr_mean,  # use run-averaged correlation
+        device=device,
     )
+
+    plot_ig_stability(
+        ig_stability,
+        var_channels=VAR_CHANNELS,
+        level_values=plev
+    )
+    plt.show()
