@@ -12,10 +12,6 @@ import logging
 logging.basicConfig(
     level=logging.INFO,                           
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.StreamHandler(),                   
-        logging.FileHandler("CNN.log")    
-    ]
 )
 
 # Data preparation 
@@ -353,7 +349,7 @@ if __name__ == "__main__":
     ds_rap = xr.open_dataset("RAP_merged_latid197.nc")
 
     # For one column for now
-    target_lon = 51.5
+    target_lon = 200
     # Pick the nearest grid column at that longitude and drop the lon dimension
     gfs_col = ds_gfs.sel(lon=target_lon, method="nearest", drop=True)
     rap_col = ds_rap.sel(lon=target_lon, method="nearest", drop=True)
